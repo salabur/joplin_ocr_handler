@@ -2,6 +2,7 @@ import base64
 import csv
 import cv2
 import datetime
+import docx2txt
 import hashlib
 import imghdr
 import imutils
@@ -12,6 +13,7 @@ import logging
 import mimetypes
 import numpy as np
 import os
+import pandas as pd
 import pikepdf
 import platform
 import requests
@@ -490,6 +492,53 @@ def ocr_image(file_path, languages):
 
     return ocr_text
 
+
+def word_to_text(file_path):
+    stream = None
+    if isinstance(file_path, io.BytesIO):
+        stream = file_path
+    elif isinstance(file_path, bytes): #CHANGED
+        stream = io.BytesIO(file_path)
+    elif isinstance(file_path, str):
+        if os.path.isfile(file_path):
+            file = open(file_path, 'rb')
+            stream = io.BytesIO(file.read())
+            file.close()
+
+    if stream:
+        text = docx2txt.process(stream)
+    else:
+        return None
+
+    return text
+
+def excel_to_markdown(file_path):
+    if isinstance(file_path, io.BytesIO):
+        stream = file_path
+    elif isinstance(file_path, bytes): #CHANGED
+        stream = io.BytesIO(file_path)
+    elif isinstance(file_path, str):
+        if os.path.isfile(file_path):
+            file = open(file_path, 'rb')
+            stream = io.BytesIO(file.read())
+            file.close()
+    else:
+        return None
+
+
+    # Read Excel file
+    excel_data = pd.read_excel(stream, engine='openpyxl', sheet_name=None)
+
+    # Convert each sheet to a Markdown table
+    markdown_tables = [tabulate.tabulate(sheet_data, tablefmt='pipe', headers='keys') for sheet_data in excel_data.values()]
+
+    # Join the tables with a separator
+    markdown = "\n\n---\n\n".join(markdown_tables)
+
+    return markdown
+
+
+
 # def correct_image(img):
 #     img = img.convert("RGBA")
 #     img = img.rotate(0, expand=True, fillcolor=(255, 255, 255))
@@ -959,6 +1008,18 @@ def upload(filename): #
         img = encode_file_base64(filename, datatype)
         values = set_json_string(title, NOTEBOOK_ID, body, img)
         db_response = db.add_file_info(basefile, ocr_status='ok')
+    elif datatype == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+        response = create_resource(filename)
+        body += f"[{basefile}](:/{response['id']})"
+        #values = set_json_string(title, NOTEBOOK_ID, body)
+
+        body += "\n<!---\n"
+        db_response = db.add_file_info(basefile, ocr_status='started')
+        body += word_to_text(filename)
+        body += "\n-->\n"
+        #img = encode_file_base64(filename, datatype)
+        values = set_json_string(title, NOTEBOOK_ID, body)
+        db_response = db.add_file_info(basefile, ocr_status='ok')
 
     else:
         response = create_resource(filename)
@@ -967,9 +1028,6 @@ def upload(filename): #
         if response["file_extension"] == "pdf":
             if os.path.isfile(filename) and filename.endswith(".pdf"):
 
-                # #languages = "deu+eng"
-                # url = "http://localhost:41184"
-                # token = JOPLIN_TOKEN
                 db_response = db.add_file_info(basefile, ocr_status='started')
                 ocr_text, img_data, pages_amount = ocr_pdf_image(filename, LANGUAGE)
                 encoded_img = encode_image(img_data, "image/png")
@@ -989,9 +1047,8 @@ def upload(filename): #
                 logging.error("The file path is not valid or does not lead to a PDF file")
                 db_response = db.add_file_info(basefile, ocr_status='fail')
                 return -1
-        else: # so its not a pdf or image etc. what now
-            logging.error("The file extension is not supported") # "should never happen" .D
-            pass # TODO
+        else: # not a pdf or image etc. just upload
+            logging.info("The file extension is not supported") 
 
     headers = {'Content-type': 'application/x-www-form-urlencoded; charset=utf-8'}
     response = requests.post(JOPLIN_SERVER + "/notes" + "?" + JOPLIN_TOKEN, data=values.encode('utf-8'), headers=headers)
@@ -1002,7 +1059,7 @@ def upload(filename): #
         logging.info(f"Placed note into notebook {NOTEBOOK_ID}: {NOTEBOOK_NAME}")
         if os.path.isdir(MOVETO):
             moveto_filename = os.path.join(MOVETO, basefile)
-            l#ogging.info(moveto_filename)
+            #logging.info(moveto_filename)
             if os.path.exists(moveto_filename):
                 logging.info(f"{basefile} exists in moveto dir, not moving!")
                 # new_filepath = rename_file(basefile, OBSERVED_FOLDERS)
@@ -1039,6 +1096,35 @@ def apply_tags(text_to_match, note_id):
     return counter
 
 
+def changed_notes_and_res(mode, tag, exclude_tags, queue):
+    if not Joplin.is_valid_connection():
+        return -1
+    if mode == "TAG_NOTES":
+        logging.info("Tagging notes. This might take a while. You can follow the progress by watching the tags in Joplin")
+        if tag is None and (exclude_tags is None or len(exclude_tags) == 0):
+            Joplin.perform_on_all_note_ids(__tag_note_with_source)
+        else:
+            tag_id = Joplin.find_tag_id_by_title(tag)
+            if tag_id is None:
+                logging.warning("tag not found")
+                return -1
+            Joplin.perform_on_tagged_note_ids(__tag_note_with_source, tag_id, exclude_tags, tag)
+        return 0
+    elif mode == "DRY_RUN":
+        set_dry_run(True)
+        return __full_run(tag, exclude_tags)
+    elif mode == "FULL_RUN":
+        set_dry_run(False)
+        return __full_run_queue(tag, exclude_tags, queue)
+    elif mode == "OBSERV_FOLDER":
+        set_dry_run(False)
+        return __observ_folder_run(OBSERVED_FOLDERS)
+    elif mode == "OBSERV_FOLDER_AND_SCAN":
+        set_dry_run(False)
+        return __observ_folder_and_scan_run(OBSERVED_FOLDERS)
+    else:
+        logging.warning(f"Mode {mode} not supported")
+    return -1
 
 def run_mode_queue(mode, tag, exclude_tags, queue):
     if not Joplin.is_valid_connection():
@@ -1561,8 +1647,14 @@ def threading_task_manager(is_uploading, tag, exclude_tags,_queue=None):
                     _note_id = _msg_data[1]
                     logging.info(f"Note ID: {_note_id} added to the OCR list. {_msg_data}")
                     queue_note_ocr.put(('note_ocr', f'{_note_id}'))
-                    
-                    #time.sleep(_wait_time_short)
+                elif _msg_data[0] == 'check_changed_note':
+                    _note_id = _msg_data[1]
+                    logging.info(f"Note ID: {_note_id} added to the OCR list. {_msg_data}")
+                    queue_note_ocr.put(('note_ocr', f'{_note_id}'))
+                elif _msg_data[0] == 'check_changed_res':
+                    _res_id = _msg_data[1]
+                    logging.info(f"Resource ID: {_res_id} added to the OCR list. {_msg_data}")
+                    queue_note_ocr.put(('note_ocr', f'{_note_id}'))
 
                 time.sleep(_wait_time_short)
 
@@ -1645,18 +1737,20 @@ def mainloop():
     set_add_previews(True)
     set_language('deu+eng')
     set_dry_run(False)
+    set_notebook_id('inbox')
 
     is_uploading = False # TODO : this is bullshit
     global IS_UPLOADING
     IS_UPLOADING = is_uploading
 
     _priority = 10
+
     # queue_jobs.put((_priority,('note_ocr', '24cdebee280d46a1b8d0421c1b96a26f')))
     # queue_jobs.put((_priority,('note_ocr', '08b401b86a2e4bf995eddad7a7cda1d6')))
     # queue_jobs.put((_priority,('note_ocr', 'a5cf0a64ca4d4c16838f568d008e36c4')))
     # queue_jobs.put((_priority,('note_ocr', '2462e6ee0e9e442788f00ee4bd31d564')))
     # queue_jobs.put((_priority,('note_ocr', '530ddef60f2d4882a27f464a92575ea6')))
-    queue_jobs.put((_priority,('note_ocr', '3aaca6b2f78a43d8a8b2e81ae03903ae')))
+    # queue_jobs.put((_priority,('note_ocr', '3aaca6b2f78a43d8a8b2e81ae03903ae')))
     
 
 
@@ -1668,6 +1762,8 @@ def mainloop():
     watcher_thread = threading.Thread(target=watcher_helper, args=(OBSERVED_FOLDERS, queue_jobs))
     threading_task_manager_thread = threading.Thread(target=threading_task_manager, args=(is_uploading, tag, exclude_tags, queue_jobs,))
     threading_run_mode_thread = threading.Thread(target=run_mode_queue, args=(MODE, tag, exclude_tags, queue_jobs,))
+    threading_changed_notes_and_res_thread = threading.Thread(target=changed_notes_and_res, args=(queue_jobs,))
+
     
     watcher_thread.start()
     threading_task_manager_thread.start()
