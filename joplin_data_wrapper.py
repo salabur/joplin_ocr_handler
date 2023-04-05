@@ -52,6 +52,14 @@ class JoplinDataWrapper:
                 'limit': '100',
                 'page': f"{page}"
                 }
+    
+    @staticmethod
+    def __paginate_by_changed_date(page: int):
+        return {'order_by': 'updated_time',
+                'desc': 1,
+                'limit': '100',
+                'page': f"{page}"
+                }
 
     def get_all_tags_from_note(self, note_id: str):
         if note_id is None:
@@ -322,6 +330,46 @@ class JoplinDataWrapper:
     def get_resource_by_id(self, resource_id):
         res = self.REST.rest_get('/resources/{}'.format(resource_id), params={'fields': 'id,title,filename,mime'})
         return JoplinResource(res.json())
+
+    def get_last_changed_notes(self, limit: int = 100, page: int = 1):
+        _notes_all = None
+        res = self.REST.rest_get('/notes', params=self.__paginate_by_changed_date(page))
+        _notes = res.json()["items"]
+
+        _notes_all = _notes
+        more = True
+        while more and len(_notes_all) < limit:
+            if res.json()["has_more"]:         
+                print("...")       
+                page += 1
+                _notes = None
+                res = self.REST.rest_get('/notes', params=self.__paginate_by_changed_date(page))
+                _notes = res.json()["items"]
+                _notes_all = _notes_all + _notes
+
+            else:
+                more = False
+
+        return _notes_all
+
+        # if response.status_code == 200:
+        #     return json.loads(response.text)
+        # else:
+        #     return None
+
+    # # Function to get the last changed resources
+    # def get_last_changed_resources(self, limit: int = 100):
+    #     params = {
+    #         'order_by': 'updated_time',
+    #         'desc': 1,
+    #         'limit': limit  # You can change the limit to retrieve more or less resources
+    #     }
+    #     response = requests.get(f'{api_endpoint}resources', headers=headers, params=params)
+    #     if response.status_code == 200:
+    #         return json.loads(response.text)
+    #     else:
+    #         return None
+
 
     def save_preview_image_as_resource(self, note_id, filename: str, title: str):
         with open(filename, "rb") as file:
