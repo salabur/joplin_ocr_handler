@@ -6,17 +6,19 @@ import cv2
 import tempfile
 import json
 from uuid import uuid4
+from PIL import Image
+import numpy as np
 import io
 import time
 
 
-try:
-    from ocr_joplin_notes import rest
-except ModuleNotFoundError as e:
-    import rest
-    logging.warning(f"Error Module Not Found - {e.args}")
-    print(f"Module Not Found: {e.args}")
-    
+# try:
+#     from joplin_ocr_handler import rest
+# except ModuleNotFoundError as e:
+import joplin_rest_api
+# logging.warning(f"Error Module Not Found - {e.args}")
+# print(f"Module Not Found: {e.args}")
+
 
 
 class JoplinNote:
@@ -39,7 +41,7 @@ class JoplinResource:
 class JoplinDataWrapper:
 
     def __init__(self, server, token):
-        self.REST = rest.RestApi(server, token)
+        self.REST = joplin_rest_api.RestApi(server, token)
         self.NOTES = []
         self.NOTES_amount_total = 0
         self.NOTES_amount_worked = 0
@@ -334,22 +336,37 @@ class JoplinDataWrapper:
 
     def save_preview_image_object_as_resource(self, note_id, image_object, title: str):
         
-        _image_object = image_object
+        # _image_object = image_object
 
-        # Decode the image array
-        img = cv2.imdecode(_image_object, cv2.IMREAD_COLOR)
+        if isinstance(image_object, bytes):
+            # Decode the image array
+            _image_object = cv2.imdecode(image_object, cv2.IMREAD_COLOR)
+            # Convert BGR to RGB
+        elif isinstance(image_object, Image.Image):
+            _image_object = image_object
+            #_image_object_test = cv2.cvtColor(np.array(image_object), cv2.COLOR_BGR2RGB)
 
-        # Convert BGR to RGB
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
+        if _image_object.mode == 'RGB':
+            rgb = _image_object #np.asanyarray(_image_object)
+        elif _image_object.mode == 'RGBA':
+            rgb = cv2.cvtColor(_image_object, cv2.COLOR_BGRA2RGB)
+        elif _image_object.mode == 'BGR':
+            rgb = cv2.cvtColor(_image_object, cv2.COLOR_BGR2RGB)
+        else:
+            rgb = _image_object #np.asanyarray(_image_object)
+
+        # rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
         # Create a buffer to write the image
         buffer = io.BytesIO()
 
-        # Encode the image to PNG format and write it to the buffer
-        _, encoded = cv2.imencode('.png', rgb)
-        buffer.write(encoded)
+        if isinstance(image_object, Image.Image):
+            _image_object = image_object
+            rgb.save(buffer, format='PNG')
+        else:
+            _, encoded = cv2.imencode('.png', rgb)
+            buffer.write(encoded)
 
-        # Reset the buffer position to the beginning
         buffer.seek(0)
 
         xy = buffer.getvalue()

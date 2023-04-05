@@ -26,12 +26,13 @@ from nltk import wordpunct_tokenize
 from nltk.corpus import stopwords
 from pathlib import Path
 from pdf2image.pdf2image import convert_from_path, convert_from_bytes
+from pdfminer.high_level import extract_text
 from PIL import Image
 from pikepdf import PdfMatrix
 from pikepdf.models import image as pikeimage
 from pytesseract import image_to_string, TesseractError, image_to_osd, Output
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import relationship, backref, sessionmaker
 from tabulate import tabulate
 from typing import Any, Tuple
@@ -143,10 +144,11 @@ class ResourceType(Enum):
 
 
 class OcrResult:
-    def __init__(self, pages, input_resource_type=ResourceType.IMAGE, preview_file=None, success=True):
+    def __init__(self, pages, input_resource_type=ResourceType.IMAGE, preview_file=None, success=True, pages_amount=0):
         self.pages = pages
         self.input_resource_type = input_resource_type
         self.preview_file = preview_file
+        self.pages_amount = pages_amount
         self.success = success
 
 
@@ -324,14 +326,16 @@ def get_buffer_sha3_256(file_buffer):
 def _rotate_image_obj(image_obj):
     if isinstance(image_obj, io.BytesIO):
         image_obj = image_obj.getvalue()
+    elif isinstance(image_obj, bytes): #CHANGED
+        image_obj = image_obj
     elif isinstance(image_obj, str):
         if os.path.isfile(image_obj) and imghdr.what(image_obj):
             image_obj = cv2.imread(image_obj)
         else:
             return None    
     else:
-        logging.error("No valid image object or file does not exist or is not an image")
-        logging.info(type(image_obj))
+        print("No valid image object or file does not exist or is not an image")
+        print(type(image_obj))
         return None    
 
     # Convert the image bytes to a PIL image object
@@ -356,6 +360,7 @@ def _rotate_image_obj(image_obj):
     _, img_encoded = cv2.imencode('.png', img_rotated)
 
     return img_encoded
+
 
 
 
@@ -411,11 +416,31 @@ def is_file_path(input_str):
     return os.path.sep in input_str
 
 def ocr_pdf_image(file_path, languages):
-    with open(file_path, "rb") as file:
-        stream = io.BytesIO(file.read())
 
+    if isinstance(file_path, io.BytesIO):
+        stream = file_path #.getvalue() # or without the getvalue() ?
+    elif isinstance(file_path, bytes): #CHANGED
+        stream = io.BytesIO(file_path)
+    elif isinstance(file_path, str):
+        if os.path.isfile(file_path):
+            with open(file_path, "rb") as file:
+                stream = io.BytesIO(file.read())
+        else:
+            img_data = None
+            ocr_text = None    
+    else:
+        print("No valid image object or file does not exist or is not an image")
+        print(type(file_path))
+        img_data = None
+        ocr_text = None   
+
+    # with open(file_path, "rb") as file:
+    #     stream = io.BytesIO(file.read())
+
+    _pages_amount = 0
     try:
         pdf = pikepdf.Pdf.open(stream)
+        _pages_amount = len(pdf.pages)
         img_data = pdf_to_image(stream)
         ocr_text = ocr_all_pages(stream, languages)
     except pikepdf.PdfError:
@@ -427,7 +452,7 @@ def ocr_pdf_image(file_path, languages):
         ocr_text = None
         logging.error("The PDF file is encrypted")
 
-    return ocr_text, img_data
+    return ocr_text, img_data, _pages_amount
 
 
 def pdf_to_image(stream):
@@ -439,20 +464,29 @@ def pdf_to_image(stream):
 def ocr_all_pages(stream, languages):
     ocr_text = ""
     images = convert_from_bytes(stream.getvalue(), fmt="png", single_file=False)
-
+    pages = len(images)
     for i, img in enumerate(images):
         img_data = correct_image_obj(img)
+        ocr_text += f"\n---------- [{i + 1}/{pages}] ----------\n"
         ocr_text += pytesseract.image_to_string(img_data, lang=languages) + "\n\n"
+        
 
     return ocr_text
 
 def ocr_image(file_path, languages):
-    with open(file_path, "rb") as file:
-        stream = io.BytesIO(file.read())
+    if isinstance(file_path, io.BytesIO):
+        stream = file_path
+    elif isinstance(file_path, bytes): #CHANGED
+        stream = io.BytesIO(file_path)
+    elif isinstance(file_path, str):
+        if os.path.isfile(file_path):
+            file = open(file_path, 'rb')
+            stream = io.BytesIO(file.read())
+            file.close()
 
-        img = Image.open(stream)
-        img_data = correct_image_obj(img)
-        ocr_text = pytesseract.image_to_string(img_data, lang=languages)
+    img = Image.open(stream)
+    img_data = correct_image_obj(img)
+    ocr_text = pytesseract.image_to_string(img_data, lang=languages)
 
     return ocr_text
 
@@ -509,7 +543,7 @@ def extract_text_from_pdf_object(pdf_object, language="deu+eng", auto_rotate=Fal
         else:
             extracted_text = ""
             logging.info(f"Page {i + 1} of {len(pdf_reader.pages)} processed with no text recognized.")
-        embedded_text = "" + page.extract_text()
+        embedded_text = "" + extract_text(pdf_data,page_numbers=[i]) #page.extract_text()
         if len(embedded_text) > len(extracted_text): # TODO check if one is in the given language(s)
             selected_text = embedded_text
         else:
@@ -549,6 +583,13 @@ def parse_languages(lang_string):
 
 
 def extract_text_from_image_object(image_object, auto_rotate=False, language="eng"):
+
+    #     if isinstance(image_obj, io.BytesIO):
+    #     image_obj = image_obj.getvalue()
+    # elif isinstance(image_obj, bytes): #CHANGED
+    #     image_obj = image_obj
+    # elif isinstance(image_obj, str):
+
     try:
 
         if isinstance(image_object, io.BytesIO):
@@ -559,7 +600,7 @@ def extract_text_from_image_object(image_object, auto_rotate=False, language="en
             else:
                 return None    
         else:
-            logging.error("No valid image object or file does not exist or is not an image")
+            logging.info("Extract text: No valid image object or file does not exist or is not an image")
             logging.info(type(image_object))
             return None    
 
@@ -643,7 +684,7 @@ def correct_image_obj(img):
         # Rotate the image
         img_rotated = imutils.rotate_bound(img_np, angle=results["rotate"])
     except TesseractError as e:
-        logging.warning(f'Error while getting immage rotation: {e}')
+        logging.warning(f'Error while getting image rotation: {e}')
         img_rotated = img_np
 
     # Convert the rotated image back to a PIL Image
@@ -790,7 +831,7 @@ class FileOcrResult:
 
 def __get_pdf_file_reader(file):
     try:
-        return pikepdf.Pdf(file, strict=False)
+        return pikepdf.Pdf.open(file)
     except pikepdf.PdfError as e:
         logging.warning(f"Error reading PDF: {str(e)}")
         return None
@@ -903,9 +944,9 @@ def upload(filename): #
 
         body += "\n<!---\n"
         try:
-            languages = "deu+eng"
+            #languages = "deu+eng"
             db_response = db.add_file_info(basefile, ocr_status='started')
-            body += ocr_image(filename, languages=languages) # type: ignore
+            body += ocr_image(filename, languages=LANGUAGE) # type: ignore
         except TypeError:
             logging.warning("Unable to perform OCR on this file.")
             db_response = db.add_file_info(basefile, ocr_status='fail')
@@ -926,11 +967,11 @@ def upload(filename): #
         if response["file_extension"] == "pdf":
             if os.path.isfile(filename) and filename.endswith(".pdf"):
 
-                languages = "deu+eng"
-                url = "http://localhost:41184"
-                token = JOPLIN_TOKEN
+                # #languages = "deu+eng"
+                # url = "http://localhost:41184"
+                # token = JOPLIN_TOKEN
                 db_response = db.add_file_info(basefile, ocr_status='started')
-                ocr_text, img_data = ocr_pdf_image(filename, languages)
+                ocr_text, img_data, pages_amount = ocr_pdf_image(filename, LANGUAGE)
                 encoded_img = encode_image(img_data, "image/png")
                 
                 if ocr_text:
@@ -1129,24 +1170,32 @@ def __ocr_resource(resource, create_preview=True):
     obj_buffer = get_buffer_for_obj(full_path)
     # Read the bytes from the buffer
     bytes_data = obj_buffer.getvalue()
+    #languages = LANGUAGE #"deu+eng"
+    #create_preview = True
 
     try:
         if mime_type[:5] == "image":
-            result = extract_text_from_image_object(obj_buffer, auto_rotate=AUTOROTATION, language=LANGUAGE)
-            if result is None:
-                return OcrResult(None)
+            # result = extract_text_from_image_object(obj_buffer, auto_rotate=AUTOROTATION, language=LANGUAGE)
+            ocr_text = ocr_image(obj_buffer, languages=LANGUAGE)
+            if ocr_text is None:
+                return OcrResult(None, success=False)
+            else:
+                result = FileOcrResult(ocr_text)
             return OcrResult(result.pages, ResourceType.IMAGE)
         elif mime_type == "application/pdf":
-            ocr_result = extract_text_from_pdf_object(obj_buffer, language=LANGUAGE, auto_rotate=AUTOROTATION)
-            create_preview = True
-            if ocr_result is None:
-                return OcrResult(None, success=False)
-            if create_preview:
-                preview_file = _rotate_image_obj(pdf_page_as_image_obj(bytes_data, is_preview=True))
-                # TODO convert
-                return OcrResult(ocr_result.pages, ResourceType.PDF, preview_file)
+            ocr_text, img_data, pages_amount = ocr_pdf_image(obj_buffer, LANGUAGE)
+            #ocr_result = extract_text_from_pdf_object(obj_buffer, language=LANGUAGE, auto_rotate=AUTOROTATION)
+
+            if ADD_PREVIEWS and ocr_text and img_data:
+                #_rotate_image_obj(pdf_page_as_image_obj(bytes_data, is_preview=True))
+
+                return OcrResult(pages=ocr_text, input_resource_type=ResourceType.PDF, preview_file=img_data, pages_amount=pages_amount)
+            elif ocr_text and img_data:
+                return OcrResult(pages=ocr_text, input_resource_type=ResourceType.PDF, pages_amount=pages_amount)
+            elif img_data and ocr_text is None:
+                return OcrResult(pages=None, input_resource_type=ResourceType.PDF, success=False, preview_file=img_data)
             else:
-                return OcrResult(ocr_result.pages, ResourceType.PDF)
+                return OcrResult(None, success=False)
     except (TypeError, OSError) as e:
         logging.error(f'Error while OCR: {e.args}')
         return OcrResult(None, success=False)
@@ -1170,19 +1219,21 @@ def __ocr_resources(note):
         resources = Joplin.get_note_resources(note.id)
         for resource_json in resources:
             resource = Joplin.get_resource_by_id(resource_json.get("id"))
+            #TODO db here
             logging.info(f"- file: {resource.title} [{resource.mime}]")
             data = __ocr_resource(resource, create_preview=ADD_PREVIEWS and note.markup_language == 2)
             if data.success is False:
                 return ResultTag.OCR_FAILED
             elif data.pages is not None and len(data.pages) > 0:
-                logging.info(f"  - pages extracted: {len(data.pages)}")
-                resulting_text = ""
-                if data.input_resource_type == ResourceType.PDF:
-                    for i in range(len(data.pages)):
-                        resulting_text += "\n---------- [{}/{}] ----------\n{}".format(i + 1, len(data.pages),
-                                                                                       data.pages[i])
-                else:
-                    resulting_text = data.pages[0]
+                logging.info(f"  - pages extracted: {data.pages_amount}")
+                resulting_text = data.pages
+                # resulting_text = ""
+                # if data.input_resource_type == ResourceType.PDF:
+                #     for i in range(len(data.pages)):
+                #         resulting_text += "\n---------- [{}/{}] ----------\n{}".format(i + 1, len(data.pages),
+                #                                                                        data.pages[i])
+                # else:
+                #     resulting_text = data.pages[0]
                 result += '\n<!-- [{}]\n{}\n-->'.format(resource.title, resulting_text)
                 if data.preview_file is not None:
                     title = "preview-{}.png".format(os.path.splitext(os.path.basename(resource.filename))[0])
@@ -1517,7 +1568,7 @@ def threading_task_manager(is_uploading, tag, exclude_tags,_queue=None):
 
             else:
                 
-                time.sleep(_wait_time_long)
+                
                 if IS_UPLOADING:
                     logging.info(f"IS_UPLOADING: {IS_UPLOADING} ... how?")
                     # upload
@@ -1528,6 +1579,8 @@ def threading_task_manager(is_uploading, tag, exclude_tags,_queue=None):
                     
                     note_ocr_from_queue(queue_note_ocr)
                     IS_UPLOADING = False
+                else:
+                    time.sleep(_wait_time_long)
 
 
 
@@ -1580,7 +1633,8 @@ def mainloop():
 
     set_mode('FULL_RUN')
     
-    tag="ojn_markup_evernote"
+    # tag="ojn_markup_evernote"
+    tag="ocr_test"
     exclude_tags=None,
 
     set_tag(tag)
@@ -1590,11 +1644,26 @@ def mainloop():
     set_autorotation(True)
     set_add_previews(True)
     set_language('deu+eng')
+    set_dry_run(False)
 
     is_uploading = False # TODO : this is bullshit
     global IS_UPLOADING
     IS_UPLOADING = is_uploading
 
+    _priority = 10
+    # queue_jobs.put((_priority,('note_ocr', '24cdebee280d46a1b8d0421c1b96a26f')))
+    # queue_jobs.put((_priority,('note_ocr', '08b401b86a2e4bf995eddad7a7cda1d6')))
+    # queue_jobs.put((_priority,('note_ocr', 'a5cf0a64ca4d4c16838f568d008e36c4')))
+    # queue_jobs.put((_priority,('note_ocr', '2462e6ee0e9e442788f00ee4bd31d564')))
+    # queue_jobs.put((_priority,('note_ocr', '530ddef60f2d4882a27f464a92575ea6')))
+    queue_jobs.put((_priority,('note_ocr', '3aaca6b2f78a43d8a8b2e81ae03903ae')))
+    
+
+
+    # TODO add functions for office files / word / excel etc.
+            # resource = Joplin.get_resource_by_id(res.get("id"))
+            # if resource.mime[:5] == "image" or resource.mime == "application/pdf":
+            #     return True
     
     watcher_thread = threading.Thread(target=watcher_helper, args=(OBSERVED_FOLDERS, queue_jobs))
     threading_task_manager_thread = threading.Thread(target=threading_task_manager, args=(is_uploading, tag, exclude_tags, queue_jobs,))
@@ -1602,14 +1671,15 @@ def mainloop():
     
     watcher_thread.start()
     threading_task_manager_thread.start()
-    threading_run_mode_thread.start()
+    #threading_run_mode_thread.start()
 
     logging.info("is running")
     watcher_thread.join()
     threading_task_manager_thread.join()
-    threading_run_mode_thread.join()
+    #threading_run_mode_thread.join()
 
-    
+
+
 
     #__observ_folder_run(OBSERVED_FOLDERS)
     logging.info("was running")
